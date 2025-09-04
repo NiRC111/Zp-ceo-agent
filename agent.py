@@ -1,197 +1,117 @@
-import io, os, datetime, tempfile
+import io, os, sys, shutil, datetime, tempfile, platform
 from typing import List, Tuple
 
 import streamlit as st
 import pandas as pd
 
-# --------------------
-# App Setup / Styling
-# --------------------
+# =============== BASIC PAGE SETUP (cannot crash) ===============
 st.set_page_config(page_title="ZP CEO Decision Agent (OCR)", layout="wide")
-
-st.markdown("""
-<style>
-:root { --brand:#0b5fff; --muted:#64748b; --ok:#1a7f37; --warn:#b58100; --bad:#b42318; }
-.block-container { max-width: 1180px; }
-h1, h2, h3 { font-weight: 700 !important; }
-hr { border: 0; border-top: 1px solid #e2e8f0; margin: 0.75rem 0 1rem 0; }
-.badge { display:inline-block; padding:2px 8px; border:1px solid #e2e8f0; border-radius:999px; color:#0f172a; background:#f8fafc; font-size:0.8rem; font-weight:600; }
-.note { color: var(--muted); font-size: 0.9rem; }
-.ok{color:var(--ok);} .warn{color:var(--warn);} .bad{color:var(--bad);}
-textarea { font-family: ui-monospace, Menlo, Consolas, monospace; }
-</style>
-""", unsafe_allow_html=True)
-
 st.title("🏛️ ZP Chandrapur — CEO Decision Agent")
-st.caption("Mandatory: **Case File** + **Government GR** (files only). OCR supports Marathi/Hindi/English via Tesseract. Paste boxes below uploads are optional.")
+st.caption("Mandatory: **Case File** + **Government GR** (files only). OCR: Marathi/Hindi/English via Tesseract. Paste boxes are optional.")
 
-# --------------------
-# Lazy Imports Helper
-# --------------------
-def _try_imports():
+# =============== ENV PREP: Make Tesseract discoverable ===============
+# Try common tessdata locations used on Streamlit (Debian 11)
+_TESSDATA_CANDIDATES = [
+    "/usr/share/tesseract-ocr/4.00/tessdata",
+    "/usr/share/tesseract-ocr/tessdata",
+    "/usr/share/share/tessdata",  # unlikely, but harmless
+]
+for p in _TESSDATA_CANDIDATES:
+    if os.path.isdir(p):
+        os.environ.setdefault("TESSDATA_PREFIX", p)
+        break
+
+# =============== VERY DEFENSIVE LAZY IMPORTS ===============
+def _lazy_imports():
     mods = {}
+    # PyMuPDF (fitz) for PDF text & page raster
     try:
-        import fitz  # PyMuPDF
+        import fitz
         mods["fitz"] = fitz
-    except Exception:
+    except Exception as e:
         mods["fitz"] = None
+        mods["fitz_err"] = str(e)
+
+    # pdfminer.six as secondary extractor
     try:
         from pdfminer.high_level import extract_text as pdfminer_extract_text
         mods["pdfminer_extract_text"] = pdfminer_extract_text
-    except Exception:
+    except Exception as e:
         mods["pdfminer_extract_text"] = None
+        mods["pdfminer_err"] = str(e)
+
+    # pytesseract + PIL for OCR
     try:
         import pytesseract
         from PIL import Image
         mods["pytesseract"] = pytesseract
         mods["PIL_Image"] = Image
-    except Exception:
+    except Exception as e:
         mods["pytesseract"] = None
         mods["PIL_Image"] = None
+        mods["pytesseract_err"] = str(e)
+
     return mods
 
-OCR_LANG = "eng+hin+mar"  # Tesseract language packs
+OCR_LANG = "eng+hin+mar"  # Devanagari + Latin
 
-# --------------------
-# OCR / Extraction
-# --------------------
-def extract_text_from_pdf(pdf_bytes: bytes, dpi: int = 220) -> Tuple[str, List[str]]:
-    """
-    Robust PDF text extraction:
-      1) PyMuPDF direct text
-      2) pdfminer.six extraction
-      3) OCR by rendering pages with Tesseract (eng+hin+mar)
-    """
-    logs = []
-    mods = _try_imports()
-    fitz = mods["fitz"]
-    pdfminer_extract_text = mods["pdfminer_extract_text"]
-    pytesseract = mods["pytesseract"]
-    PIL_Image = mods["PIL_Image"]
+# =============== DIAGNOSTICS PANEL (TOP) ===============
+with st.expander("🧪 Environment Check (auto)", expanded=True):
+    cols = st.columns(2)
 
-    text = ""
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(pdf_bytes)
-        pdf_path = tmp.name
+    with cols[0]:
+        st.markdown("**Runtime**")
+        st.write({
+            "python": sys.version.split()[0],
+            "platform": platform.platform(),
+            "cwd": os.getcwd(),
+        })
+        st.write("**Streamlit**:", st.__version__)
+        st.write("**pandas**:", pd.__version__)
 
-    # 1) PyMuPDF direct
-    try:
-        if fitz is not None:
-            logs.append("PyMuPDF: direct extraction.")
-            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-            parts = [page.get_text("text") for page in doc]
-            doc.close()
-            text = "\n".join(parts).strip()
-        else:
-            logs.append("PyMuPDF not available.")
-    except Exception as e:
-        logs.append(f"PyMuPDF failed: {e}")
+        # Binary paths
+        tesseract_bin = shutil.which("tesseract")
+        st.write("**tesseract path**:", tesseract_bin or "NOT FOUND")
+        st.write("**TESSDATA_PREFIX**:", os.environ.get("TESSDATA_PREFIX", "(unset)"))
 
-    # 2) pdfminer fallback
-    if len(text) < 120 and pdfminer_extract_text is not None:
-        logs.append("pdfminer.six: secondary extraction.")
-        try:
-            text2 = pdfminer_extract_text(pdf_path) or ""
-            if len(text2) > len(text):
-                text = text2
-                logs.append("pdfminer improved text.")
-        except Exception as e:
-            logs.append(f"pdfminer failed: {e}")
+    mods = _lazy_imports()
+    with cols[1]:
+        st.markdown("**Python imports**")
+        st.write({
+            "fitz(PyMuPDF)": "OK" if mods.get("fitz") else f"ERROR: {mods.get('fitz_err','')}",
+            "pdfminer.six": "OK" if mods.get("pdfminer_extract_text") else f"ERROR: {mods.get('pdfminer_err','')}",
+            "pytesseract": "OK" if mods.get("pytesseract") else f"ERROR: {mods.get('pytesseract_err','')}",
+            "Pillow": "OK" if mods.get("PIL_Image") else "ERROR (PIL not loaded)",
+        })
 
-    # 3) OCR on rendered pages (Tesseract only)
-    if len(text) < 120:
-        logs.append("Direct text weak → OCR on rendered pages (Tesseract).")
-        if fitz is None:
-            logs.append("Cannot OCR rendered pages (PyMuPDF missing).")
-        elif pytesseract is None or PIL_Image is None:
-            logs.append("pytesseract/Pillow not available; OCR skipped.")
-        else:
+        # Try reading tesseract version & langs
+        tesseract_status = {}
+        if mods.get("pytesseract"):
             try:
-                doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-                ocr_segments = []
-                for page_index in range(len(doc)):
-                    page = doc[page_index]
-                    zoom = dpi / 72.0
-                    mat = fitz.Matrix(zoom, zoom)
-                    pix = page.get_pixmap(matrix=mat, alpha=False)
-                    img_bytes = pix.tobytes("png")
-
-                    img = PIL_Image.open(io.BytesIO(img_bytes))
-                    ocr = pytesseract.image_to_string(img, lang=OCR_LANG)
-                    ocr_segments.append(ocr)
-
-                doc.close()
-                merged = "\n\n".join(ocr_segments).strip()
-                if len(merged) > len(text):
-                    text = merged
-                    logs.append("OCR extracted text successfully.")
+                v = mods["pytesseract"].get_tesseract_version()
+                tesseract_status["version"] = str(v)
             except Exception as e:
-                logs.append(f"OCR pipeline failed: {e}")
+                tesseract_status["version_error"] = str(e)
 
-    try:
-        os.unlink(pdf_path)
-    except Exception:
-        pass
+            # List languages (best-effort; won't crash app if fails)
+            try:
+                from subprocess import run, PIPE
+                out = run(["tesseract", "--list-langs"], stdout=PIPE, stderr=PIPE, text=True)
+                tesseract_status["langs_head"] = "\n".join(out.stdout.splitlines()[:15]) or out.stderr[:300]
+            except Exception as e:
+                tesseract_status["langs_error"] = str(e)
 
-    return text.strip(), logs
+        st.write("**Tesseract**:", tesseract_status or "pytesseract not loaded")
 
-def extract_text_from_image(img_bytes: bytes) -> Tuple[str, List[str]]:
-    logs = []
-    mods = _try_imports()
-    pytesseract = mods["pytesseract"]
-    PIL_Image = mods["PIL_Image"]
-
-    text = ""
-    try:
-        if pytesseract is not None and PIL_Image is not None:
-            img = PIL_Image.open(io.BytesIO(img_bytes))
-            text = pytesseract.image_to_string(img, lang=OCR_LANG) or ""
-            logs.append(f"pytesseract OCR used ({OCR_LANG}).")
-        else:
-            logs.append("pytesseract/Pillow not available; OCR skipped.")
-    except Exception as e:
-        logs.append(f"Image OCR failed: {e}")
-    return (text or "").strip(), logs
-
-def extract_text_any(uploaded_file) -> Tuple[str, List[str]]:
-    name = uploaded_file.name.lower()
-    data = uploaded_file.read()
-    logs = [f"File: {uploaded_file.name} ({len(data)} bytes)"]
-
-    if name.endswith(".txt"):
-        try:
-            text = data.decode("utf-8", errors="ignore")
-            logs.append("Read as .txt (utf-8).")
-            return text, logs
-        except Exception as e:
-            logs.append(f"TXT decode failed: {e}")
-            return "", logs
-
-    if name.endswith(".pdf"):
-        txt, more = extract_text_from_pdf(data)
-        return txt, logs + more
-
-    if any(name.endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"]):
-        txt, more = extract_text_from_image(data)
-        return txt, logs + more
-
-    logs.append("Unsupported file type.")
-    return "", logs
-
-# --------------------
-# Sidebar Help
-# --------------------
+# =============== HELP SIDEBAR ===============
 with st.sidebar:
     st.markdown("### Help")
-    st.write("• Upload **Case** and **Government GR** (PDF/IMG/TXT). Files are mandatory.")
-    st.write("• Paste boxes are **optional**; use only if OCR fails.")
-    st.write("• Click **Generate Decision** then review and **Download Order** (EN/MR/Both).")
-    st.write("• OCR languages: Marathi/Hindi/English (Tesseract).")
-    st.write("• See **Debug / OCR Logs** for details.")
+    st.write("• Upload **Case** and **Government GR** — files are mandatory.")
+    st.write("• If OCR yields no text, paste into optional boxes.")
+    st.write("• Click **Generate Decision** → then review **Order** (EN/MR/Both).")
+    st.write("• Use this page’s **Environment Check** and **Debug Logs** if anything goes wrong.")
 
-# --------------------
-# Case Intake
-# --------------------
+# =============== CASE INTAKE ===============
 st.markdown("## 1) Case Intake")
 c1, c2 = st.columns(2)
 with c1:
@@ -207,38 +127,160 @@ issues = st.text_area("Issues (comma-separated)", "eligibility under Rule 12(3),
 annexures = st.text_area("Annexures (one per line)", "ApplicationForm\nIDProof\nFeeReceipt")
 st.markdown("<hr/>", unsafe_allow_html=True)
 
-# --------------------
-# Documents — Mandatory
-# --------------------
+# =============== DOCUMENTS (MANDATORY FILES) ===============
 st.markdown("## 2) Documents — Case & GR (Mandatory)")
 
-# CASE (file mandatory; text optional)
 st.markdown("#### A) Case Upload  <span class='badge'>Mandatory (file)</span>", unsafe_allow_html=True)
 case_file = st.file_uploader("📄 Upload Case File", type=["pdf","txt","png","jpg","jpeg","webp","tif","tiff"], key="case_file")
-case_text_manual = st.text_area("Optional: paste Case text (use only if OCR fails)", height=160, key="case_text_manual")
-case_specific = st.text_area("Specific Legal Inputs (Case) — sections/clauses/admissions (optional)", height=120, key="case_specific")
+case_text_manual = st.text_area("Optional: paste Case text (use only if OCR fails)", height=140, key="case_text_manual")
+case_specific = st.text_area("Specific Legal Inputs (Case) — sections/clauses/admissions (optional)", height=100, key="case_specific")
 
-# GR (file mandatory; text optional)
 st.markdown("#### B) Government GR Upload  <span class='badge'>Mandatory (file)</span>", unsafe_allow_html=True)
 gr_file = st.file_uploader("📑 Upload Government GR", type=["pdf","txt","png","jpg","jpeg","webp","tif","tiff"], key="gr_file")
-gr_text_manual = st.text_area("Optional: paste GR text (use only if OCR fails)", height=160, key="gr_text_manual")
-gr_specific = st.text_area("Specific Legal Inputs (GR) — exact GR numbers/dates/clauses (optional)", height=120, key="gr_specific")
+gr_text_manual = st.text_area("Optional: paste GR text (use only if OCR fails)", height=140, key="gr_text_manual")
+gr_specific = st.text_area("Specific Legal Inputs (GR) — exact GR numbers/dates/clauses (optional)", height=100, key="gr_specific")
 
 st.markdown("<hr/>", unsafe_allow_html=True)
 
-# --------------------
-# Optional Authorities
-# --------------------
+# =============== OPTIONAL AUTHORITIES ===============
 st.markdown("## 3) Additional Authorities (Optional)")
 judgments = st.file_uploader("Upload Judgments", type=["pdf","txt"], accept_multiple_files=True)
 sections = st.file_uploader("Upload Legal Sections", type=["pdf","txt"], accept_multiple_files=True)
 sops = st.file_uploader("Upload SOPs", type=["pdf","txt"], accept_multiple_files=True)
-other_inputs = st.text_area("Other Legal Inputs / Notes", height=120)
+other_inputs = st.text_area("Other Legal Inputs / Notes", height=100)
 st.markdown("<hr/>", unsafe_allow_html=True)
 
-# --------------------
-# Helpers
-# --------------------
+# =============== OCR / EXTRACTION LAYER (DEFENSIVE) ===============
+def extract_text_from_pdf(pdf_bytes: bytes, dpi: int = 220) -> Tuple[str, List[str]]:
+    logs: List[str] = []
+    mods = _lazy_imports()
+    fitz = mods.get("fitz")
+    pdfminer_extract_text = mods.get("pdfminer_extract_text")
+    pytesseract = mods.get("pytesseract")
+    PIL_Image = mods.get("PIL_Image")
+
+    text = ""
+    # Save for pdfminer (needs a path)
+    pdf_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(pdf_bytes)
+            pdf_path = tmp.name
+    except Exception as e:
+        logs.append(f"tmp pdf write failed: {e}")
+
+    # 1) PyMuPDF direct
+    try:
+        if fitz is not None:
+            logs.append("PyMuPDF: direct extraction.")
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            parts = []
+            for page in doc:
+                try:
+                    parts.append(page.get_text("text"))
+                except Exception as e:
+                    logs.append(f"fitz page.get_text error: {e}")
+            doc.close()
+            text = "\n".join(parts).strip()
+        else:
+            logs.append(f"PyMuPDF not available ({mods.get('fitz_err','')}).")
+    except Exception as e:
+        logs.append(f"PyMuPDF failed: {e}")
+
+    # 2) pdfminer fallback
+    if (not text) and pdfminer_extract_text is not None and pdf_path:
+        logs.append("pdfminer: secondary extraction.")
+        try:
+            t2 = pdfminer_extract_text(pdf_path) or ""
+            if len(t2) > len(text):
+                text = t2
+                logs.append("pdfminer extracted text.")
+        except Exception as e:
+            logs.append(f"pdfminer failed: {e}")
+
+    # 3) OCR (only if still weak)
+    if len(text) < 120:
+        if fitz is None:
+            logs.append("OCR skipped (fitz missing for raster).")
+        elif (pytesseract is None or PIL_Image is None):
+            logs.append("OCR skipped (pytesseract/PIL missing).")
+        else:
+            logs.append("OCR: rasterize pages → Tesseract (eng+hin+mar)")
+            try:
+                doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+                ocr_buf = []
+                for p in doc:
+                    zoom = dpi / 72.0
+                    mat = fitz.Matrix(zoom, zoom)
+                    pix = p.get_pixmap(matrix=mat, alpha=False)
+                    img_bytes = pix.tobytes("png")
+                    img = PIL_Image.open(io.BytesIO(img_bytes))
+                    try:
+                        ocr = pytesseract.image_to_string(img, lang="eng+hin+mar")
+                        ocr_buf.append(ocr)
+                    except Exception as e:
+                        logs.append(f"tesseract page OCR error: {e}")
+                doc.close()
+                ocr_text = "\n\n".join(ocr_buf).strip()
+                if len(ocr_text) > len(text):
+                    text = ocr_text
+                    logs.append("OCR extracted text.")
+            except Exception as e:
+                logs.append(f"OCR pipeline failed: {e}")
+
+    # cleanup
+    if pdf_path:
+        try: os.unlink(pdf_path)
+        except Exception: pass
+
+    return text.strip(), logs
+
+def extract_text_from_image(img_bytes: bytes) -> Tuple[str, List[str]]:
+    logs: List[str] = []
+    mods = _lazy_imports()
+    pytesseract = mods.get("pytesseract")
+    PIL_Image = mods.get("PIL_Image")
+
+    text = ""
+    if pytesseract is None or PIL_Image is None:
+        logs.append("Image OCR skipped (pytesseract/PIL missing).")
+        return "", logs
+
+    try:
+        img = PIL_Image.open(io.BytesIO(img_bytes))
+        text = pytesseract.image_to_string(img, lang="eng+hin+mar") or ""
+        logs.append("Image OCR via Tesseract succeeded.")
+    except Exception as e:
+        logs.append(f"Image OCR failed: {e}")
+
+    return text.strip(), logs
+
+def extract_text_any(uploaded_file) -> Tuple[str, List[str]]:
+    name = (uploaded_file.name or "").lower()
+    data = uploaded_file.read()
+    logs = [f"File: {uploaded_file.name} ({len(data)} bytes)"]
+
+    try:
+        if name.endswith(".txt"):
+            text = data.decode("utf-8", errors="ignore")
+            logs.append("Read as .txt (utf-8).")
+            return text, logs
+
+        if name.endswith(".pdf"):
+            txt, more = extract_text_from_pdf(data)
+            return txt, logs + more
+
+        if any(name.endswith(ext) for ext in (".png",".jpg",".jpeg",".webp",".tif",".tiff")):
+            txt, more = extract_text_from_image(data)
+            return txt, logs + more
+
+        logs.append("Unsupported file type.")
+        return "", logs
+    except Exception as e:
+        logs.append(f"extract_text_any error: {e}")
+        return "", logs
+
+# =============== UTILS & PREVIEW ===============
 debug_lines: List[str] = []
 
 def preview(name: str, text: str):
@@ -248,10 +290,10 @@ def preview(name: str, text: str):
 
 def read_text_from_upload(label: str, uploaded_file, manual_text: str) -> str:
     """
-    Order of preference:
-      1) manual pasted text (optional)
-      2) OCR/extract from uploaded file
-      3) empty string (if OCR fails)
+    Priority:
+      1) Optional manual text
+      2) OCR/extract from file
+      3) Empty string (if OCR fails)
     """
     if manual_text and manual_text.strip():
         debug_lines.append(f"{label}: using manual pasted text.")
@@ -267,34 +309,30 @@ def read_text_from_upload(label: str, uploaded_file, manual_text: str) -> str:
             debug_lines.append(f"{label}: EMPTY after extraction/OCR.")
             return ""
     else:
-        debug_lines.append(f"{label}: no file uploaded.")
+        debug_lines.append(f"{label}: file missing (should be mandatory).")
         return ""
 
-# --------------------
-# Generate Decision
-# --------------------
+# =============== GENERATE DECISION ===============
 st.markdown("## 4) Generate Decision & Order")
 lang = st.radio("Order Language", ["English", "Marathi", "Both"], index=0, horizontal=True)
 
 if st.button("Generate Decision", type="primary"):
-    # Only files are mandatory
     if case_file is None or gr_file is None:
         st.error("❌ Please upload both **Case File** and **Government GR** (files are mandatory).")
     else:
-        # Try OCR/text; paste fields are optional
         case_txt = read_text_from_upload("CASE", case_file, case_text_manual)
         gr_txt   = read_text_from_upload("GR",   gr_file,   gr_text_manual)
 
-        missing_case_text = (not case_txt.strip())
-        missing_gr_text   = (not gr_txt.strip())
+        missing_case_text = not case_txt.strip()
+        missing_gr_text   = not gr_txt.strip()
 
         warnings = []
         if missing_case_text:
-            warnings.append("Case file text not extracted (OCR could not read). You can paste it in the optional Case box.")
+            warnings.append("Case file text not extracted (OCR couldn’t read). Paste it in the optional Case box if available.")
         if missing_gr_text:
-            warnings.append("GR text not extracted (OCR could not read). You can paste it in the optional GR box.")
+            warnings.append("GR text not extracted (OCR couldn’t read). Paste it in the optional GR box if available.")
 
-        # Decision (rule-based baseline; swap with LLM if desired)
+        # Simple rules → swap to LLM later if needed
         recommended = "Approve with conditions"
         risks = []
         if "hearing" in case_txt.lower() and "not" in case_txt.lower():
@@ -321,23 +359,17 @@ if st.button("Generate Decision", type="primary"):
         st.success("✅ Decision generated")
         st.json(decision)
 
-        # Previews (if text exists)
         if case_txt.strip(): preview("CASE", case_txt)
         if gr_txt.strip():   preview("GR", gr_txt)
 
-        # Store for order generation
         st.session_state["decision"] = decision
-        st.session_state["case_txt"] = case_txt
-        st.session_state["gr_txt"] = gr_txt
         st.session_state["officer"] = officer
         st.session_state["jurisdiction"] = jurisdiction
         st.session_state["issues"] = issues
         st.session_state["cause_date"] = str(cause_date)
         st.session_state["filing_date"] = str(filing_date)
 
-# --------------------
-# Generate Order
-# --------------------
+# =============== GENERATE ORDER ===============
 if "decision" in st.session_state:
     st.markdown("### Draft Order")
     today = datetime.date.today().strftime("%Y-%m-%d")
@@ -374,7 +406,6 @@ Based on the record and cited GRs, compliance and natural justice must be ensure
 It is ordered that: {d['recommended_outcome']}.
 Compliance within **7 days**.
 """
-
     order_mr = f"""**विभाग**: जिल्हा परिषद, चंद्रपूर
 **फाइल क्रमांक**: {d['case_id']}
 **दिनांक**: {today}
@@ -401,6 +432,8 @@ Compliance within **7 days**.
 **७ दिवसांच्या** आत अनुपालन करावे.
 """
 
+    lang = st.radio("Preview language", ["English", "Marathi", "Both"], index=0, horizontal=True, key="preview_lang")
+
     if lang in ["English", "Both"]:
         st.subheader("📜 Order (English)")
         st.code(order_en, language="markdown")
@@ -411,11 +444,9 @@ Compliance within **7 days**.
         st.code(order_mr, language="markdown")
         st.download_button("Download Order (MR).md", order_mr, file_name=f"{d['case_id']}_order_MR.md")
 
-# --------------------
-# Debug / OCR Logs
-# --------------------
+# =============== DEBUG LOGS ===============
 with st.expander("🔧 Debug / OCR Logs", expanded=False):
-    if debug_lines:
+    if len(globals().get("debug_lines", [])) > 0:
         st.write("\n".join(f"- {ln}" for ln in debug_lines))
     else:
         st.caption("Logs will appear here after processing.")
