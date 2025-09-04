@@ -23,7 +23,7 @@ textarea { font-family: ui-monospace, Menlo, Consolas, monospace; }
 """, unsafe_allow_html=True)
 
 st.title("🏛️ ZP Chandrapur — CEO Decision Agent")
-st.caption("Mandatory: **Case File** + **Government GR** (files only). OCR supports Marathi/Hindi/English. Paste boxes below uploads are optional.")
+st.caption("Mandatory: **Case File** + **Government GR** (files only). OCR supports Marathi/Hindi/English via Tesseract. Paste boxes below uploads are optional.")
 
 # --------------------
 # Lazy Imports Helper
@@ -48,14 +48,9 @@ def _try_imports():
     except Exception:
         mods["pytesseract"] = None
         mods["PIL_Image"] = None
-    try:
-        import easyocr    # fallback OCR (en/hi)
-        mods["easyocr"] = easyocr
-    except Exception:
-        mods["easyocr"] = None
     return mods
 
-OCR_LANG = "eng+hin+mar"  # tesseract language pack selection
+OCR_LANG = "eng+hin+mar"  # Tesseract language packs
 
 # --------------------
 # OCR / Extraction
@@ -65,7 +60,7 @@ def extract_text_from_pdf(pdf_bytes: bytes, dpi: int = 220) -> Tuple[str, List[s
     Robust PDF text extraction:
       1) PyMuPDF direct text
       2) pdfminer.six extraction
-      3) OCR by rendering pages (pytesseract preferred, easyocr fallback for en/hi)
+      3) OCR by rendering pages with Tesseract (eng+hin+mar)
     """
     logs = []
     mods = _try_imports()
@@ -73,7 +68,6 @@ def extract_text_from_pdf(pdf_bytes: bytes, dpi: int = 220) -> Tuple[str, List[s
     pdfminer_extract_text = mods["pdfminer_extract_text"]
     pytesseract = mods["pytesseract"]
     PIL_Image = mods["PIL_Image"]
-    easyocr = mods["easyocr"]
 
     text = ""
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
@@ -104,11 +98,13 @@ def extract_text_from_pdf(pdf_bytes: bytes, dpi: int = 220) -> Tuple[str, List[s
         except Exception as e:
             logs.append(f"pdfminer failed: {e}")
 
-    # 3) OCR on rendered pages
+    # 3) OCR on rendered pages (Tesseract only)
     if len(text) < 120:
-        logs.append("Direct text weak → OCR on rendered pages.")
+        logs.append("Direct text weak → OCR on rendered pages (Tesseract).")
         if fitz is None:
             logs.append("Cannot OCR rendered pages (PyMuPDF missing).")
+        elif pytesseract is None or PIL_Image is None:
+            logs.append("pytesseract/Pillow not available; OCR skipped.")
         else:
             try:
                 doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -120,20 +116,11 @@ def extract_text_from_pdf(pdf_bytes: bytes, dpi: int = 220) -> Tuple[str, List[s
                     pix = page.get_pixmap(matrix=mat, alpha=False)
                     img_bytes = pix.tobytes("png")
 
-                    if pytesseract is not None and PIL_Image is not None:
-                        img = PIL_Image.open(io.BytesIO(img_bytes))
-                        ocr = pytesseract.image_to_string(img, lang=OCR_LANG)
-                        ocr_segments.append(ocr)
-                    elif easyocr is not None:
-                        # easyocr supports en/hi (Marathi not fully supported)
-                        reader = easyocr.Reader(["en", "hi"], gpu=False)
-                        res = reader.readtext(io.BytesIO(img_bytes), detail=0)
-                        ocr_segments.append("\n".join(res))
-                    else:
-                        logs.append("No OCR engine (pytesseract/easyocr) installed.")
-                        break
-                doc.close()
+                    img = PIL_Image.open(io.BytesIO(img_bytes))
+                    ocr = pytesseract.image_to_string(img, lang=OCR_LANG)
+                    ocr_segments.append(ocr)
 
+                doc.close()
                 merged = "\n\n".join(ocr_segments).strip()
                 if len(merged) > len(text):
                     text = merged
@@ -153,7 +140,6 @@ def extract_text_from_image(img_bytes: bytes) -> Tuple[str, List[str]]:
     mods = _try_imports()
     pytesseract = mods["pytesseract"]
     PIL_Image = mods["PIL_Image"]
-    easyocr = mods["easyocr"]
 
     text = ""
     try:
@@ -161,13 +147,8 @@ def extract_text_from_image(img_bytes: bytes) -> Tuple[str, List[str]]:
             img = PIL_Image.open(io.BytesIO(img_bytes))
             text = pytesseract.image_to_string(img, lang=OCR_LANG) or ""
             logs.append(f"pytesseract OCR used ({OCR_LANG}).")
-        elif easyocr is not None:
-            reader = easyocr.Reader(["en", "hi"], gpu=False)
-            res = reader.readtext(io.BytesIO(img_bytes), detail=0)
-            text = "\n".join(res)
-            logs.append("easyocr used (en/hi fallback).")
         else:
-            logs.append("No OCR engine installed.")
+            logs.append("pytesseract/Pillow not available; OCR skipped.")
     except Exception as e:
         logs.append(f"Image OCR failed: {e}")
     return (text or "").strip(), logs
@@ -202,11 +183,11 @@ def extract_text_any(uploaded_file) -> Tuple[str, List[str]]:
 # --------------------
 with st.sidebar:
     st.markdown("### Help")
-    st.write("• Upload **Case** and **Government GR** files (PDF/IMG/TXT).")
+    st.write("• Upload **Case** and **Government GR** (PDF/IMG/TXT). Files are mandatory.")
     st.write("• Paste boxes are **optional**; use only if OCR fails.")
-    st.write("• Click **Generate Decision** → then review and **Download Order** (EN/MR/Both).")
-    st.write("• Use **Debug / OCR Logs** at bottom if something fails.")
-    st.write("• OCR languages: Marathi/Hindi/English.")
+    st.write("• Click **Generate Decision** then review and **Download Order** (EN/MR/Both).")
+    st.write("• OCR languages: Marathi/Hindi/English (Tesseract).")
+    st.write("• See **Debug / OCR Logs** for details.")
 
 # --------------------
 # Case Intake
@@ -300,7 +281,7 @@ if st.button("Generate Decision", type="primary"):
     if case_file is None or gr_file is None:
         st.error("❌ Please upload both **Case File** and **Government GR** (files are mandatory).")
     else:
-        # Try to read OCR/text; paste fields are optional
+        # Try OCR/text; paste fields are optional
         case_txt = read_text_from_upload("CASE", case_file, case_text_manual)
         gr_txt   = read_text_from_upload("GR",   gr_file,   gr_text_manual)
 
