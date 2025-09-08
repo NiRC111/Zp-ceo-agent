@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "name": "zp-ceo-govt-ai",
+  "builds": [
+    { "src": "Dockerfile", "use": "@vercel/docker" }
+  ],
+  "routes": [
+    { "src": "/(.*)", "dest": "/" }
+  ]
+}
