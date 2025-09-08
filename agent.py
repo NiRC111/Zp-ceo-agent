@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """
 Government Quasi-Judicial AI System — Zilla Parishad, Chandrapur
-- Professional government UI
+- Professional government UI with built-in/overrideable seal
 - Mandatory Case + GR uploads
 - OCR (Marathi/Hindi/English)
 - GR clause highlighter
 - Quasi-judicial order drafts (Marathi & English)
+- Signature block + seal watermark
 - Sensitive-mode redaction & no disk writes for text
 - Robust PDF extraction (PyMuPDF/pdfminer/pypdf + OCR fallback)
 """
@@ -70,6 +71,30 @@ html, body { background: var(--bg); }
 /* GR clause highlight */
 .hl { background: #fff3cd; border-bottom: 2px solid #facc15; }
 
+/* --- Watermark support --- */
+.wm-wrap { position: relative; }
+.wm-bg {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  pointer-events: none; z-index: 0;
+}
+.wm-bg img {
+  opacity: .08; width: 42%;
+  min-width: 260px; max-width: 460px;
+  filter: grayscale(100%);
+}
+.order-content { position: relative; z-index: 1; }
+
+/* Signature block */
+.sig-block{
+  margin-top: 24px; padding-top: 12px; border-top: 1px dashed var(--line);
+  line-height: 1.45;
+}
+.sig-rows{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px 24px; }
+.sig-label{ color:#6b7280; font-size:.92rem; }
+.sig-name{ font-weight:700; }
+.sig-desig{ margin-top:-2px; }
+
 /* Footer */
 .footer {
   margin-top: 18px; padding-top: 10px; border-top:1px solid var(--line);
@@ -127,6 +152,10 @@ def _lazy_imports():
         mods["fitz"] = fitz
     except Exception as e:
         mods["fitz"] = None; mods["fitz_err"] = str(e)
+    try:
+        from pdfminer_high_level import extract_text as _noop  # defensive alias if someone renames
+    except Exception:
+        pass
     try:
         from pdfminer.high_level import extract_text as pdfminer_extract_text
         mods["pdfminer_extract_text"] = pdfminer_extract_text
@@ -321,10 +350,9 @@ COMMON_SUBJECTS = [
 
 def infer_key_points(case_txt: str, gr_txt: str, extra_legal: str) -> Dict:
     """Light rules to surface checks & risks; acts as a safety net for the draft."""
-    text = " ".join([case_txt.lower(), gr_txt.lower(), extra_legal.lower()])
     checks, risks = [], []
     # GR: local residency patterns
-    if any(k in gr_txt for k in ["स्थानिक", "रहिवासी", "local resident", "residency"]):
+    if any(k in gr_txt for k in ["स्थानिक", "รहिवासी", "रहिवासी", "local resident", "residency"]):
         checks.append("GR mentions local residency requirement.")
         if "3 km" in case_txt.lower() or "३" in case_txt or "3 कि" in case_txt or "३ कि" in case_txt:
             risks.append("Selection appears non-local while GR requires local residency.")
@@ -439,6 +467,37 @@ Upon consideration of the record and relevant Government Resolution(s), it is fo
 
 (Chief Executive Officer)  
 Zilla Parishad, Chandrapur
+"""
+
+# ────────────────────────── SIGNATURE BLOCK BUILDER ──────────────────────────
+def build_signature_block(lang: str, name: str, designation: str, place: str, sign_date: str) -> str:
+    if lang.lower().startswith("mar"):
+        return f"""
+<div class="sig-block">
+  <div class="sig-rows">
+    <div><span class="sig-label">स्थान :</span> {place}</div>
+    <div><span class="sig-label">दिनांक :</span> {sign_date}</div>
+  </div>
+  <div style="height:36px"></div>
+  <div class="sig-name">({name})</div>
+  <div class="sig-desig">{designation}</div>
+  <div>जिल्हा परिषद, चंद्रपूर</div>
+  <div class="small">[कार्यालयीन शिक्का / Official Seal]</div>
+</div>
+"""
+    else:
+        return f"""
+<div class="sig-block">
+  <div class="sig-rows">
+    <div><span class="sig-label">Place:</span> {place}</div>
+    <div><span class="sig-label">Date:</span> {sign_date}</div>
+  </div>
+  <div style="height:36px"></div>
+  <div class="sig-name">({name})</div>
+  <div class="sig-desig">{designation}</div>
+  <div>Zilla Parishad, Chandrapur</div>
+  <div class="small">[Office Seal / Official Stamp]</div>
+</div>
 """
 
 # ────────────────────────── UI TABS ──────────────────────────
@@ -596,7 +655,7 @@ with t3:
             st.session_state["meta"] = meta
             st.session_state["refs"] = [ln.strip() for ln in (references_text or "").splitlines() if ln.strip()]
 
-# ——— Generate Order
+# ——— Generate Order (with watermark + signature block)
 with t4:
     st.markdown("<div class='section-title'>Generate Order</div>", unsafe_allow_html=True)
     if "decision" not in st.session_state:
@@ -605,20 +664,58 @@ with t4:
         decision = st.session_state["decision"]
         meta = st.session_state["meta"]
         refs = st.session_state.get("refs", [])
+
+        # Signature & watermark controls
+        st.markdown("#### Signature & Presentation")
+        colA, colB, colC = st.columns([1.1, 1.1, 1])
+        with colA:
+            sign_name = st.text_input("Signatory Name", value="(Name of CEO)")
+            sign_designation = st.text_input("Designation", value="Chief Executive Officer")
+        with colB:
+            sign_place = st.text_input("Place", value="Chandrapur")
+            sign_date = st.text_input("Sign Date (dd/mm/yyyy)", value=datetime.date.today().strftime("%d/%m/%Y"))
+        with colC:
+            add_watermark = st.toggle("Watermark with ZP Seal", value=True)
+            include_signature = st.toggle("Include Signature Block", value=True)
+
         default_idx = 0 if (lang_default=="Marathi" or contains_devanagari(decision["subject"])) else 1
         view_lang = st.radio("Preview Language", ["Marathi","English","Both"], index=default_idx, horizontal=True)
 
+        # Base orders
+        mr = order_marathi_quasi(meta, decision, refs)
+        en = order_english_quasi(meta, decision, refs)
+
+        # Signature blocks
+        mr_sig_html = build_signature_block("marathi", sign_name, sign_designation, sign_place, sign_date) if include_signature else ""
+        en_sig_html = build_signature_block("english", sign_name, sign_designation, sign_place, sign_date) if include_signature else ""
+        mr_md_tail = f"\n\n\n({sign_name})\n{sign_designation}\nजिल्हा परिषद, चंद्रपूर\nस्थान: {sign_place}  दिनांक: {sign_date}\n" if include_signature else ""
+        en_md_tail = f"\n\n\n({sign_name})\n{sign_designation}\nZilla Parishad, Chandrapur\nPlace: {sign_place}  Date: {sign_date}\n" if include_signature else ""
+
+        # Watermark wrapper
+        wm_html_top = f"""<div class="order-block wm-wrap"><div class="wm-bg"><img src="{st.session_state['seal_data_url']}" /></div><div class="order-content">""" if add_watermark \
+                      else """<div class="order-block"><div class="order-content">"""
+        wm_html_bottom = "</div></div>"
+
+        # Render & downloads
         if view_lang in ["Marathi","Both"]:
-            mr = order_marathi_quasi(meta, decision, refs)
             st.markdown("#### 📜 Marathi Order")
-            st.markdown(f"<div class='order-block'>{mr}</div>", unsafe_allow_html=True)
-            st.download_button("Download Order (MR).md", mr, file_name=f"{decision['case_id']}_Order_MR.md", use_container_width=True)
+            st.markdown(wm_html_top + mr + mr_sig_html + wm_html_bottom, unsafe_allow_html=True)
+            st.download_button(
+                "Download Order (MR).md",
+                mr + ("\n\n---\n" + mr_md_tail if include_signature else ""),
+                file_name=f"{decision['case_id']}_Order_MR.md",
+                use_container_width=True
+            )
 
         if view_lang in ["English","Both"]:
-            en = order_english_quasi(meta, decision, refs)
             st.markdown("#### 📜 English Order")
-            st.markdown(f"<div class='order-block'>{en}</div>", unsafe_allow_html=True)
-            st.download_button("Download Order (EN).md", en, file_name=f"{decision['case_id']}_Order_EN.md", use_container_width=True)
+            st.markdown(wm_html_top + en + en_sig_html + wm_html_bottom, unsafe_allow_html=True)
+            st.download_button(
+                "Download Order (EN).md",
+                en + ("\n\n---\n" + en_md_tail if include_signature else ""),
+                file_name=f"{decision['case_id']}_Order_EN.md",
+                use_container_width=True
+            )
 
 # ——— System / Security
 with t5:
