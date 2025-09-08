@@ -1,0 +1,18 @@
+[server]
+headless = true
+address = "0.0.0.0"
+port = 8501
+enableXsrfProtection = true
+enableCORS = false
+cookieSameSite = "strict"
+
+[logger]
+level = "info"
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
+primaryColor = "#0B3A82"
+textColor = "#0b1220"
