@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240" viewBox="0 0 240 240">
+  <circle cx="120" cy="120" r="108" fill="none" stroke="#0B3A82" stroke-width="10"/>
+  <circle cx="120" cy="120" r="86" fill="none" stroke="#0B3A82" stroke-width="2" stroke-dasharray="4 6"/>
+  <g transform="translate(120,120)">
+    <polygon fill="#0B3A82" points="0,-40 8,-8 40,0 8,8 0,40 -8,8 -40,0 -8,-8"/>
+  </g>
+  <text x="120" y="95" text-anchor="middle" font-size="14" fill="#0B3A82">Zilla Parishad, Chandrapur</text>
+  <text x="120" y="115" text-anchor="middle" font-size="12" fill="#0B3A82">जिल्हा परिषद, चंद्रपूर</text>
+  <text x="120" y="170" text-anchor="middle" font-size="10" fill="#0B3A82">Government Quasi-Judicial AI System</text>
+</svg>
